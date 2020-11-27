@@ -451,6 +451,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("built btree in: {:?}", start.elapsed());
     }
 
+    println!("Enter article name per line and get article offset:");
     let mut buf = String::new();
     loop {
         buf.clear();
