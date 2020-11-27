@@ -235,7 +235,10 @@ impl DiskBTree {
         }
 
         // Compare the key tails
-        let mut nkey_tail = vec![0; (node.key_length as usize) - KEY_HEAD];
+        // We only need max `key.len() + 1` bytes from node key for comparison.
+        // So there's no need to read the entire key from disk.
+        let min_len = (node.key_length as usize).min(key.len() + 1) - KEY_HEAD;
+        let mut nkey_tail = vec![0; min_len];
         self.file.seek(SeekFrom::Start(node.key_offset)).ok()?;
         self.file.read_exact(&mut nkey_tail[..]).ok()?;
         Some(nkey_tail[..].cmp(key_tail))
