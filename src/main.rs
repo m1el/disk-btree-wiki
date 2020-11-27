@@ -112,6 +112,9 @@ impl DiskBTree {
             .read(true).write(true).create(true)
             .open(path)?;
 
+        // This is effectively a buffer for hand-rolled .chunks iterator.
+        let mut out = [BTreeNode::zero(); BTREE_WIDTH];
+
         let mut btree = Self {
             file,
             root_chunk: out,
@@ -125,9 +128,6 @@ impl DiskBTree {
         // Here we will store the next level of BTree nodes.
         // It's going to be BTREE_WIDTH times smaller than the input size.
         let mut index = Vec::new();
-
-        // This is effectively a buffer for hand-rolled .chunks iterator.
-        let mut out = [BTreeNode::zero(); BTREE_WIDTH];
 
         // Iterate over every key-value pair, and process them in chunks.
         for (key, value) in it {
