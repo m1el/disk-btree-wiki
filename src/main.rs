@@ -100,13 +100,18 @@ impl DiskBTree {
               I: ExactSizeIterator<Item=(&'a str, u64)>
     {
         let length = it.len();
+        // Pre-calculate the total number of nodes stored in the BTree.
+        // This allows us to determine string pool location ahead of the time.
         let (nodes, _depth) = Self::calc_size(length as u64);
+        let mut string_offset =
+            (HEADER_SIZE as u64) + (NODE_SIZE as u64) * nodes;
+
+        // We need to open the file with read+write so that we can use it
+        // for lookup as well.
         let file = OpenOptions::new()
             .read(true).write(true).create(true)
             .open(path)?;
-        let mut string_offset =
-            (HEADER_SIZE as u64) + (NODE_SIZE as u64) * nodes;
-        let mut out = [BTreeNode::zero(); BTREE_WIDTH];
+
         let mut btree = Self {
             file,
             root_chunk: out,
@@ -116,11 +121,21 @@ impl DiskBTree {
 
         let mut ii = 0;
         let mut node_offset = HEADER_SIZE as u64;
+
+        // Here we will store the next level of BTree nodes.
+        // It's going to be BTREE_WIDTH times smaller than the input size.
         let mut index = Vec::new();
+
+        // This is effectively a buffer for hand-rolled .chunks iterator.
+        let mut out = [BTreeNode::zero(); BTREE_WIDTH];
+
+        // Iterate over every key-value pair, and process them in chunks.
         for (key, value) in it {
             let mut key_head = [0; KEY_HEAD];
             let head_len = key.len().min(key_head.len());
             let mut key_offset = 0;
+
+            // Write the key tail to string pool if necessary
             if key.len() > KEY_HEAD {
                 assert!(key.len() < u32::max_value() as usize,
                         "Key is too big");
@@ -129,7 +144,10 @@ impl DiskBTree {
                 key_offset = string_offset;
                 string_offset += (key.len() - KEY_HEAD) as u64;
             }
+            // Copy key head to the node data
             key_head[..head_len].copy_from_slice(&key.as_bytes()[..head_len]);
+
+            // Copy the node to chunk buffer
             out[ii % BTREE_WIDTH] = BTreeNode {
                 value,
                 branches: 0,
@@ -138,6 +156,8 @@ impl DiskBTree {
                 key_head,
             };
             ii += 1;
+
+            // Once we collect a full chunk, write it to the disk.
             if ii % BTREE_WIDTH == 0 {
                 btree.file.seek(SeekFrom::Start(node_offset))?;
                 btree.write_chunk(&out)?;
@@ -147,6 +167,7 @@ impl DiskBTree {
             }
         }
 
+        // Handle the last incomplete chunk
         if ii % BTREE_WIDTH != 0 {
             btree.file.seek(SeekFrom::Start(node_offset))?;
             let len = ii % BTREE_WIDTH;
@@ -156,41 +177,31 @@ impl DiskBTree {
             node_offset += (len * NODE_SIZE) as u64;
         }
 
-        // let mut level = 0;
-        // reduce index until we have one node.
+        // Reduce index until we have one node.
+        // On each reduction, the size is divided by BTREE_WIDTH
         while index.len() > 1 {
             // level += 1;
             // println!("level {} len {}", level, index.len());
             let mut prev_index = Vec::new();
             core::mem::swap(&mut index, &mut prev_index);
-            let mut ii = 0;
-            for node in prev_index.drain(..) {
-                out[ii % BTREE_WIDTH] = node;
-                ii += 1;
 
-                if ii % BTREE_WIDTH == 0 {
-                    btree.write_chunk(&out)?;
-                    let node = out[BTREE_WIDTH - 1];
-                    index.push(node.to_index(BTREE_WIDTH as u32, node_offset));
-                    node_offset += (BTREE_WIDTH * NODE_SIZE) as u64;
-                }
-            }
-
-            if ii % BTREE_WIDTH != 0 {
-                let len = ii % BTREE_WIDTH;
-                btree.write_chunk(&out[..len])?;
-                let node = out[len - 1];
-                index.push(node.to_index(len as u32, node_offset));
-                node_offset += (len * NODE_SIZE) as u64;
+            for chunk in prev_index.chunks(BTREE_WIDTH) {
+                btree.write_chunk(chunk)?;
+                let node = chunk.last()
+                    .expect(".chunks returned an empty slice?");
+                index.push(node.to_index(chunk.len() as u32, node_offset));
+                node_offset += (chunk.len() * NODE_SIZE) as u64;
             }
         }
 
+        // Write the root node.  It's going to be the last one.
         let root = index[0];
         let root_chunk = btree.read_chunk(root.value, root.branches as usize)?;
         btree.root_chunk = root_chunk;
         btree.root_branches = root.branches as usize;
         btree.write_chunk(&index[..1])?;
 
+        // Write the header with all the necessary information.
         let mut buf = [0; HEADER_SIZE];
         BTreeHeader::new(length as u64, node_offset).to_buf(&mut buf);
         btree.file.seek(SeekFrom::Start(0))?;
@@ -200,10 +211,9 @@ impl DiskBTree {
     }
 
     /// Compares node key with provided key
-    fn cmp_key(&mut self, node: BTreeNode, key: &str)
-               -> Option<Ordering>
-    {
+    fn cmp_key(&mut self, node: BTreeNode, key: &str) -> Option<Ordering> {
         let key = key.as_bytes();
+        // Split the key in head and tail.
         let (key_head, key_tail) =
             if key.len() > KEY_HEAD {
                 (&key[..KEY_HEAD], &key[KEY_HEAD..])
@@ -213,28 +223,22 @@ impl DiskBTree {
 
         let head_size = (node.key_length as usize).min(KEY_HEAD);
         let nkey_head = &node.key_head[..head_size];
+
         let cmp = nkey_head.cmp(key_head);
         if cmp != Ordering::Equal {
             return Some(cmp);
         }
 
-        if node.key_length as usize <= KEY_HEAD {
-            if key_tail.is_empty() {
-                return Some(Ordering::Equal);
-            } else {
-                return Some(Ordering::Less);
-            }
+        // Handle the case when one of the keys fits completely in head.
+        if node.key_length as usize <= KEY_HEAD || key.len() <= KEY_HEAD {
+            return Some((node.key_length as usize).cmp(&key.len()));
         }
 
-        if key_tail.is_empty() {
-            Some(Ordering::Greater)
-        } else {
-            let mut nkey_tail =
-                vec![0; (node.key_length as usize) - KEY_HEAD];
-            self.file.seek(SeekFrom::Start(node.key_offset)).ok()?;
-            self.file.read_exact(&mut nkey_tail[..]).ok()?;
-            Some(nkey_tail[..].cmp(key_tail))
-        }
+        // Compare the key tails
+        let mut nkey_tail = vec![0; (node.key_length as usize) - KEY_HEAD];
+        self.file.seek(SeekFrom::Start(node.key_offset)).ok()?;
+        self.file.read_exact(&mut nkey_tail[..]).ok()?;
+        Some(nkey_tail[..].cmp(key_tail))
     }
 
     /// Lookup a `key` in the BTree
@@ -249,6 +253,7 @@ impl DiskBTree {
                 let node = chunk[ii];
                 let cmp = self.cmp_key(node, key)?;
                 if node.branches == 0 {
+                    // Handle leaf nodes
                     branches = false;
                     match cmp {
                         Ordering::Equal => {
@@ -260,6 +265,7 @@ impl DiskBTree {
                         Ordering::Less => {}
                     }
                 } else {
+                    // Handle branch nodes
                     match cmp {
                         Ordering::Equal | Ordering::Greater => {
                             chunk = self.read_chunk(
@@ -284,6 +290,7 @@ impl DiskBTree {
         None
     }
 
+    /// Write a chunk to disk.
     fn write_chunk(&mut self, nodes: &[BTreeNode]) -> io::Result<()> {
         assert!(nodes.len() <= BTREE_WIDTH,
                 "too many nodes to write");
@@ -332,6 +339,7 @@ impl BTreeHeader {
             root,
         }
     }
+
     fn from_buf(buf: &[u8]) -> Self {
         assert!(buf.len() >= core::mem::size_of::<Self>(),
                 "Not enough data to create header");
@@ -341,6 +349,7 @@ impl BTreeHeader {
         let root = u64::from_le_bytes(buf[24..32].try_into().unwrap());
         Self { magic, width, length, root }
     }
+
     fn to_buf(&self, buf: &mut [u8]) {
         assert!(buf.len() >= core::mem::size_of::<Self>(),
                 "Not enough space to write header");
@@ -449,6 +458,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         index = DiskBTree::from_sorted(
             index_path, map.iter().map(|(s, &v)| (s.as_str(), v)))?;
         println!("built btree in: {:?}", start.elapsed());
+
+        /// Test if key lookup works correctly
+        const TEST_LOOKUP: bool = false;
+        if TEST_LOOKUP {
+            let start = std::time::Instant::now();
+            let mut ii = 0;
+            for (key, &val) in map.iter() {
+                ii += 1;
+                if ii % 0x3ffff == 0 {
+                    println!("test progress: {} / {}", ii, map.len());
+                }
+                let got = index.lookup(key.as_str());
+                if Some(val) != got {
+                    println!("mismatched lookup: key={:?} {:?}!={}",
+                             key, got, val);
+                }
+            }
+            println!("checked {} keys in: {:?}", map.len(), start.elapsed());
+        }
     }
 
     println!("Enter article name per line and get article offset:");
