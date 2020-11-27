@@ -121,13 +121,13 @@ impl DiskBTree {
             let mut key_head = [0; KEY_HEAD];
             let head_len = key.len().min(key_head.len());
             let mut key_offset = 0;
-            if key.len() > key_head.len() {
+            if key.len() > KEY_HEAD {
                 assert!(key.len() < u32::max_value() as usize,
                         "Key is too big");
                 btree.file.seek(SeekFrom::Start(string_offset))?;
-                btree.file.write_all(&key.as_bytes()[8..])?;
+                btree.file.write_all(&key.as_bytes()[KEY_HEAD..])?;
                 key_offset = string_offset;
-                string_offset += (key.len() - 8) as u64;
+                string_offset += (key.len() - KEY_HEAD) as u64;
             }
             key_head[..head_len].copy_from_slice(&key.as_bytes()[..head_len]);
             out[ii % BTREE_WIDTH] = BTreeNode {
@@ -205,8 +205,8 @@ impl DiskBTree {
     {
         let key = key.as_bytes();
         let (key_head, key_tail) =
-            if key.len() > 8 {
-                (&key[..8], &key[8..])
+            if key.len() > KEY_HEAD {
+                (&key[..KEY_HEAD], &key[KEY_HEAD..])
             } else {
                 (&key[..], &[][..])
             };
@@ -381,7 +381,7 @@ impl BTreeNode {
         buf[8..12].copy_from_slice(&self.branches.to_le_bytes());
         buf[12..16].copy_from_slice(&self.key_length.to_le_bytes());
         buf[16..24].copy_from_slice(&self.key_offset.to_le_bytes());
-        buf[24..32].copy_from_slice(&self.key_head);
+        buf[24..24 + KEY_HEAD].copy_from_slice(&self.key_head);
     }
     fn from_buf(buf: &[u8]) -> Self {
         assert!(buf.len() == NODE_SIZE, "provided incorrect node size");
@@ -389,7 +389,7 @@ impl BTreeNode {
         let branches = u32::from_le_bytes(buf[8..12].try_into().unwrap());
         let key_length = u32::from_le_bytes(buf[12..16].try_into().unwrap());
         let key_offset = u64::from_le_bytes(buf[16..24].try_into().unwrap());
-        let key_head = buf[24..32].try_into().unwrap();
+        let key_head = buf[24..24 + KEY_HEAD].try_into().unwrap();
         Self {
             value,
             branches,
