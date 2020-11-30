@@ -27,3 +27,7 @@ for Leaf nodes, key corresponds to the node itself.
 necessary to interpret it is contained in nodes (key offset and length).
 String pool only contains the tail bytes of a key.
 If a key fits in node field `key_head`, string pool is not used.
+
+# License
+
+The MIT License
