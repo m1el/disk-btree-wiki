@@ -2,7 +2,7 @@
 
 This is a quick and dirty imlpementation of on-disk read-only BTree.
 The purpose of this project is to build a fast and self-contained index for
-Wikipedia's multistream-index.txt files, instead of using a full database.
+Wikipedia's [multistream-index.txt files](https://dumps.wikimedia.org/tpiwiktionary/), instead of using a full database.
 
 The on-disk representation of BTree is the following:
 
